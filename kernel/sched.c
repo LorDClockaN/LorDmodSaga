@@ -9269,5 +9269,5 @@ struct cgroup_subsys cpuacct_subsys = {
 	.subsys_id = cpuacct_subsys_id,
 };
 #endif	/* CONFIG_CGROUP_CPUACCT */
-\ No newline at end of file
+// No newline at end of file
 #endif /* CONFIG_SCHED_BFS */
