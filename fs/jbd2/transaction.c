@@ -77,32 +77,6 @@ jbd2_get_transaction(journal_t *journal, transaction_t *transaction)
  */
 
 /*
- * Update transiaction's maximum wait time, if debugging is enabled.
- *
- * In order for t_max_wait to be reliable, it must be protected by a
- * lock.  But doing so will mean that start_this_handle() can not be
- * run in parallel on SMP systems, which limits our scalability.  So
- * unless debugging is enabled, we no longer update t_max_wait, which
- * means that maximum wait time reported by the jbd2_run_stats
- * tracepoint will always be zero.
- */
-static inline void update_t_max_wait(transaction_t *transaction)
-{
-#ifdef CONFIG_JBD2_DEBUG
-	unsigned long ts = jiffies;
-
-	if (jbd2_journal_enable_debug &&
-	    time_after(transaction->t_start, ts)) {
-		ts = jbd2_time_diff(ts, transaction->t_start);
-		spin_lock(&transaction->t_handle_lock);
-		if (ts > transaction->t_max_wait)
-			transaction->t_max_wait = ts;
-		spin_unlock(&transaction->t_handle_lock);
-	}
-#endif
-}
-
-/*
  * start_this_handle: Given a handle, deal with any locking or stalling
  * needed to make sure that there is enough journal space for the handle
  * to begin.  Attach the handle to a transaction and set up the
@@ -111,10 +85,10 @@ static inline void update_t_max_wait(transaction_t *transaction)
 
 static int start_this_handle(journal_t *journal, handle_t *handle)
 {
-	transaction_t	*transaction, *new_transaction = NULL;
-	tid_t		tid;
-	int		needed, need_to_start;
+	transaction_t *transaction;
+	int needed;
 	int nblocks = handle->h_buffer_credits;
+	transaction_t *new_transaction = NULL;
 	int ret = 0;
 	unsigned long ts = jiffies;
 
@@ -207,11 +181,8 @@ repeat_locked:
 		spin_unlock(&transaction->t_handle_lock);
 		prepare_to_wait(&journal->j_wait_transaction_locked, &wait,
 				TASK_UNINTERRUPTIBLE);
-		tid = transaction->t_tid;
-		need_to_start = !tid_geq(journal->j_commit_request, tid);
+		__jbd2_log_start_commit(journal, transaction->t_tid);
 		spin_unlock(&journal->j_state_lock);
-		if (need_to_start)
-			jbd2_log_start_commit(journal, tid);
 		schedule();
 		finish_wait(&journal->j_wait_transaction_locked, &wait);
 		goto repeat;
@@ -428,8 +399,7 @@ int jbd2_journal_restart(handle_t *handle, int nblocks)
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal = transaction->t_journal;
-	tid_t		tid;
-	int		need_to_start, ret;
+	int ret;
 
 	/* If we've had an abort of any type, don't even think about
 	 * actually doing the restart! */
@@ -453,11 +423,8 @@ int jbd2_journal_restart(handle_t *handle, int nblocks)
 	spin_unlock(&transaction->t_handle_lock);
 
 	jbd_debug(2, "restarting handle %p\n", handle);
-	tid = transaction->t_tid;
-	need_to_start = !tid_geq(journal->j_commit_request, tid);
+	__jbd2_log_start_commit(journal, transaction->t_tid);
 	spin_unlock(&journal->j_state_lock);
-	if (need_to_start)
-		jbd2_log_start_commit(journal, tid);
 
 	lock_map_release(&handle->h_lockdep_map);
 	handle->h_buffer_credits = nblocks;
