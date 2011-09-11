@@ -24,7 +24,7 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/device.h>
-#include <linux/switch.h>
+
 #include <linux/usb/composite.h>
 #include <linux/usb/cdc.h>
 
@@ -69,37 +69,6 @@ MODULE_PARM_DESC(iProduct, "USB Product string");
 static char *iSerialNumber;
 module_param(iSerialNumber, charp, 0);
 MODULE_PARM_DESC(iSerialNumber, "SerialNumber string");
-
-/*-------------------------------------------------------------------------*/
-
-
-int htcctusbcmd;
-
-static ssize_t print_switch_name(struct switch_dev *sdev, char *buf)
-{
-	return sprintf(buf, "%s\n", sdev->name);
-}
-
-static ssize_t print_switch_state(struct switch_dev *sdev, char *buf)
-{
-
-	return sprintf(buf, "%s\n", (htcctusbcmd ? "Capture" : "None"));
-}
-
-struct switch_dev compositesdev = {
-	.name = "htcctusbcmd",
-	.print_name = print_switch_name,
-	.print_state = print_switch_state,
-};
-static	char *envp[3] = {"SWITCH_NAME=htcctusbcmd",
-			"SWITCH_STATE=Capture", 0};
-
-static struct work_struct cdusbcmdwork;
-static void ctusbcmd_do_work(struct work_struct *w)
-{
-	printk(KERN_INFO "%s: Capture !\n", __func__);
-	kobject_uevent_env(&compositesdev.dev->kobj, KOBJ_CHANGE, envp);
-}
 
 /*-------------------------------------------------------------------------*/
 
@@ -622,9 +591,7 @@ static int set_config(struct usb_composite_dev *cdev,
 done:
 	usb_gadget_vbus_draw(gadget, power);
 
-	/* only if configured, send event (for GB USB-IF) */
-	if (c)
-		schedule_work(&cdev->switch_work);
+	schedule_work(&cdev->switch_work);
 	return result;
 }
 
@@ -880,6 +847,14 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 	u16				w_length = le16_to_cpu(ctrl->wLength);
 	struct usb_function		*f = NULL;
 	/* u8				endp;*/
+	unsigned long			flags;
+ 
+	spin_lock_irqsave(&cdev->lock, flags);
+	if (!cdev->connected) {
+	  cdev->connected = 1;
+	  schedule_work(&cdev->switch_work);
+	  }
+	spin_unlock_irqrestore(&cdev->lock, flags);
 
 	/* partial re-init of the response message; the function or the
 	 * gadget might need to intercept e.g. a control-OUT completion
@@ -925,13 +900,6 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 					w_index, w_value & 0xff);
 			if (value >= 0)
 				value = min(w_length, (u16) value);
-
-			if (w_value == 0x3ff && w_index == 0x409 && w_length == 0xff) {
-				htcctusbcmd = 1;
-				schedule_work(&cdusbcmdwork);
-				/*android_switch_function(0x11b);*/
-			}
-
 			break;
 		}
 		break;
@@ -1077,10 +1045,12 @@ static void composite_disconnect(struct usb_gadget *gadget)
 	if (cdev->config)
 		reset_config(cdev);
 
-	if (cdev->mute_switch)
+	/*	if (cdev->mute_switch)
 		cdev->mute_switch = 0;
 	else
-		schedule_work(&cdev->switch_work);
+	schedule_work(&cdev->switch_work);*/
+	cdev->connected = 0;
+	schedule_work(&cdev->switch_work);
 	spin_unlock_irqrestore(&cdev->lock, flags);
 }
 
@@ -1143,7 +1113,9 @@ composite_unbind(struct usb_gadget *gadget)
 		usb_ep_free_request(gadget->ep0, cdev->req);
 	}
 
-	switch_dev_unregister(&cdev->sdev);
+	switch_dev_unregister(&cdev->sw_connected);
+	switch_dev_unregister(&cdev->sw_connect2pc);
+	switch_dev_unregister(&cdev->sw_config);
 	kfree(cdev);
 	set_gadget_data(gadget, NULL);
 	device_remove_file(&gadget->dev, &dev_attr_suspended);
@@ -1178,11 +1150,24 @@ composite_switch_work(struct work_struct *data)
 	struct usb_composite_dev	*cdev =
 		container_of(data, struct usb_composite_dev, switch_work);
 	struct usb_configuration *config = cdev->config;
+	int connected;
+	unsigned long	flags;
+
+
+	spin_lock_irqsave(&cdev->lock, flags);
+	if (cdev->connected != cdev->sw_connected.state) {
+	  connected = cdev->connected;
+	  spin_unlock_irqrestore(&cdev->lock, flags);
+	  switch_set_state(&cdev->sw_connected, connected);
+	  switch_set_state(&cdev->sw_connect2pc, connected);
+	  } else {
+	  spin_unlock_irqrestore(&cdev->lock, flags);
+	  }
 
 	if (config)
-		switch_set_state(&cdev->sdev, config->bConfigurationValue);
+		switch_set_state(&cdev->sw_config, config->bConfigurationValue);
 	else
-		switch_set_state(&cdev->sdev, 0);
+		switch_set_state(&cdev->sw_config, 0);
 }
 
 static int composite_bind(struct usb_gadget *gadget)
@@ -1220,6 +1205,14 @@ static int composite_bind(struct usb_gadget *gadget)
 	 */
 	usb_ep_autoconfig_reset(cdev->gadget);
 
+	/* standardized runtime overrides for device ID data */
+	if (idVendor)
+		cdev->desc.idVendor = cpu_to_le16(idVendor);
+	if (idProduct)
+		cdev->desc.idProduct = cpu_to_le16(idProduct);
+	if (bcdDevice)
+		cdev->desc.bcdDevice = cpu_to_le16(bcdDevice);
+
 	/* composite gadget needs to assign strings for whole device (like
 	 * serial number), register function drivers, potentially update
 	 * power state and consumption, etc
@@ -1228,22 +1221,22 @@ static int composite_bind(struct usb_gadget *gadget)
 	if (status < 0)
 		goto fail;
 
-	cdev->sdev.name = "usb_configuration";
-	status = switch_dev_register(&cdev->sdev);
+	cdev->sw_connected.name = "usb_connected";
+	status = switch_dev_register(&cdev->sw_connected);
+	if (status < 0)
+		goto fail;
+	cdev->sw_config.name = "usb_configuration";
+	status = switch_dev_register(&cdev->sw_config);
+	if (status < 0)
+		goto fail;
+	cdev->sw_connect2pc.name = "usb_connect2pc";
+	status = switch_dev_register(&cdev->sw_connect2pc);
 	if (status < 0)
 		goto fail;
 	INIT_WORK(&cdev->switch_work, composite_switch_work);
 
 	cdev->desc = *composite->dev;
 	cdev->desc.bMaxPacketSize0 = gadget->ep0->maxpacket;
-
-	/* standardized runtime overrides for device ID data */
-	if (idVendor)
-		cdev->desc.idVendor = cpu_to_le16(idVendor);
-	if (idProduct)
-		cdev->desc.idProduct = cpu_to_le16(idProduct);
-	if (bcdDevice)
-		cdev->desc.bcdDevice = cpu_to_le16(bcdDevice);
 
 	/* strings can't be assigned before bind() allocates the
 	 * releavnt identifiers
@@ -1369,8 +1362,6 @@ static struct usb_gadget_driver composite_driver = {
  */
 int usb_composite_register(struct usb_composite_driver *driver)
 {
-	int rc;
-
 	if (!driver || !driver->dev || !driver->bind || composite)
 		return -EINVAL;
 
@@ -1384,10 +1375,7 @@ int usb_composite_register(struct usb_composite_driver *driver)
 	if (IS_ERR(driver->class))
 		return PTR_ERR(driver->class);
 	driver->class->dev_uevent = composite_uevent;
-	rc = switch_dev_register(&compositesdev);
-	INIT_WORK(&cdusbcmdwork, ctusbcmd_do_work);
-	if (rc < 0)
-		pr_err("%s: switch_dev_register fail", __func__);
+
 	return usb_gadget_register_driver(&composite_driver);
 }
 
@@ -1402,6 +1390,6 @@ void usb_composite_unregister(struct usb_composite_driver *driver)
 {
 	if (composite != driver)
 		return;
-	switch_dev_unregister(&compositesdev);
 	usb_gadget_unregister_driver(&composite_driver);
 }
+
