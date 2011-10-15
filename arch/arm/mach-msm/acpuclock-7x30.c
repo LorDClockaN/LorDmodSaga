@@ -51,7 +51,7 @@
 /* mv = (750mV + (raw * 25mV)) * (2 - VREF_SEL) */
 #define VDD_RAW(mv) (((MV(mv) / V_STEP) - 30) | VREG_DATA)
 
-#define MAX_AXI_KHZ 201600
+#define MAX_AXI_KHZ 192000
 
 #define PLL2_L_VAL_ADDR  (MSM_CLK_CTL_BASE + 0x33c)
 
@@ -105,12 +105,9 @@ static struct cpufreq_frequency_table freq_table[] = {
 	{ 18, 1536000 },
 	{ 19, 1612800 },
 	{ 20, 1689600 },
-	{ 21, 1766400 },
-	{ 22, 1843200 },
-	{ 23, 1920000 },
-	{ 24, 1996800 },
-	{ 25, 2016000 },
-	{ 26, CPUFREQ_TABLE_END },
+	{ 21, 1728000 },
+	{ 22, 1766400 },
+	{ 23, CPUFREQ_TABLE_END },
 };
 
 /* Use negative numbers for sources that can't be enabled/disabled */
@@ -144,11 +141,8 @@ static struct clkctl_acpu_speed acpu_freq_tbl[] = {
 	{ 1536000, PLL_2,   3, 0,  192000, 1275, VDD_RAW(1275) },
 	{ 1612800, PLL_2,   3, 0,  199680, 1325, VDD_RAW(1325) },
 	{ 1689600, PLL_2,   3, 0,  199680, 1375, VDD_RAW(1375) },
+	{ 1728000, PLL_2,   3, 0,  199680, 1400, VDD_RAW(1400) },
 	{ 1766400, PLL_2,   3, 0,  199680, 1425, VDD_RAW(1425) },
-	{ 1843200, PLL_2,   3, 0,  199680, 1450, VDD_RAW(1450) },
-	{ 1920000, PLL_2,   3, 0,  199680, 1475, VDD_RAW(1475) },
-	{ 1996800, PLL_2,   3, 0,  199680, 1500, VDD_RAW(1500) },
-	{ 2016000, PLL_2,   3, 0,  201600, 1500, VDD_RAW(1500) },
 	{ 0 }
 };
 static unsigned long max_axi_rate;
